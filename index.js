@@ -3,20 +3,23 @@
 const Hapi = require('hapi');
 const parseUrl = require("parse-url");
 const axios = require("axios");
-const orgId = "40400";
+const orgId = "541000";
 
 const server = Hapi.server({
     port: 3000,
     host: 'localhost'
 });
 
-const basicParam = "?for_cv2=true&take=-1";
+const basicParam = "?for_cv2=true&take=1";
 
-var otherUrls = `/research/v3/organizations/${orgId}/research/all/filter${basicParam}`;
+const basicParamCV1 = "?for_cv2=false&take=1";
+
 const baseUrl = "http://ruanr-7w3:2424";
-const compareUrl = "http://e2e2cv2intws.moodys.com";
+// const compareUrl = "http://e2e2cv2intws.moodys.com";
+const compareUrl = "http://ruanr-7w3:2424";
 const isFilter = false;
 var selFilter = "type";
+const isTypeSelect = selFilter === "type";
 
 const compareFilterlength = ([base, compare]) => {
     if (base.data && compare.data) {
@@ -33,6 +36,34 @@ const compareDatalength = ([base, compare]) => {
         return base.data.list.length === compare.data.list.length;
     }
     return false;
+}
+
+const compareDataWithMultiple = (results, allUrls, t) => {
+    var res = "";
+    var singleUrls = "";
+    var sum = 0;
+    var mul = 0;
+    for (let i = 0; i < allUrls.length; i++) {
+        const url = allUrls[i];
+        const resl = results[i];
+        if (url.includes("m=1")) {
+            mul = resl.data._total_count;
+            if ((mul !== sum && t) || mul < sum) {
+                res += `${singleUrls} <br /> ${url} <div style="color: red;">error-> ${mul} : ${sum}</div> <br />`;
+            }
+            singleUrls = "";
+            sum = 0;
+        } else {
+            if (t) {
+                sum += resl.data._total_count;
+            } else {
+                sum = Math.max(sum, resl.data._total_count);
+            }
+            
+            singleUrls += `${url} <br /> <div style="color: green;">${resl.data._total_count}</div> <br />`;
+        }
+    }
+    return res;
 }
 
 const selectFilterWhichMultiple = (mulFilter, { region_filters, research_type_filters, series_filters, topic_filters }) => {
@@ -71,26 +102,41 @@ const selectFilterWhichMultiple = (mulFilter, { region_filters, research_type_fi
 }
 
 const getAllUrlsPromise = (allFilters, withFilterUrl) => {
-    const isTypeSelect = selFilter === "type";
     const { region_filters, research_type_filters, series_filters, topic_filters } = allFilters;
     const index = 0;
     const urlsPromise = [];
     var multipleUrl = "";
-    var multipleOptions = "(";
+    var multipleOptions = "";
+    var multipleCategorys = "";
     const { multiple, other } = selectFilterWhichMultiple(selFilter, allFilters);
-    multiple.list.forEach(m => {
-        var otherUrl = `/research/v3/organizations/${orgId}/research/all${withFilterUrl}${basicParam}`;
-        var singleUrl = compareUrl + otherUrl + other + m.key;
-        if (isTypeSelect) {
-            otherUrl = `/research/v3/organizations/${orgId}/research/${m.key}${withFilterUrl}${basicParam}`;
-            singleUrl = compareUrl + otherUrl + other;
-        }
-        urlsPromise.push(singleUrl);
-        multipleOptions += m.key + "|";
-    });
-    multipleOptions = multipleOptions.substring(0, multipleOptions.length - 1) + ")";
+    if (!isTypeSelect) {
+        multipleOptions = "(";
+        multiple.list.forEach(m => {
+            var otherUrl = `/research/v3/organizations/${orgId}/research/all${withFilterUrl}${basicParam}`;
+            var singleUrl = compareUrl + otherUrl + other + m.key;
+            urlsPromise.push(singleUrl);
+            multipleOptions += m.key + "|";
+        });
+        multipleOptions = multipleOptions.substring(0, multipleOptions.length - 1) + ")";
+    } else {
+        multiple.list.forEach(m => {
+            var otherUrl = `/research/v3/organizations/${orgId}/research/all${withFilterUrl}${basicParam}`;
+            var singleUrl = compareUrl + otherUrl + other + m.key;
+            multipleOptions += m.key + ":";
+            m.child_filters.list.forEach(j => {
+                otherUrl = `/research/v3/organizations/${orgId}/research/${m.key}${withFilterUrl}${basicParam}&type=${j.key}`;
+                singleUrl = compareUrl + otherUrl + other;
+                urlsPromise.push(singleUrl);
+                multipleOptions += j.key + "|";
+            });
+            multipleCategorys += m.key + "|";
+            multipleOptions = multipleOptions.substring(0, multipleOptions.length - 1) + ",";
+        });
+        multipleCategorys = multipleCategorys.substring(0, multipleCategorys.length - 1);
+        multipleOptions = multipleOptions.substring(0, multipleOptions.length - 1);
+    }
     if (isTypeSelect) {
-        urlsPromise.unshift(`${baseUrl}/research/v3/organizations/${orgId}/research/${multipleOptions.substring(1, multipleOptions.length - 1)}${withFilterUrl}${basicParam}${other}`);
+        urlsPromise.unshift(`${baseUrl}/research/v3/organizations/${orgId}/research/${multipleCategorys}${withFilterUrl}${basicParam}${other}&type=${multipleOptions}`);
     } else {
         urlsPromise.unshift(`${baseUrl}/research/v3/organizations/${orgId}/research/all${withFilterUrl}${basicParam}${other + multipleOptions}`);
     }
@@ -210,18 +256,77 @@ const compareMultipleDocuments = (promises, allUrls) => {
     return results.length === 0 ? `${allUrls.join("<br />")}<br />success!`: results.join();
 }
 
+const mapTypeKey = (key) => {
+    const categoryMapping = {
+        "all": "All",
+        "issuer_research": "Issuer",
+        "methodology": "Methodology",
+        "ratings_news": "Ratings-News",
+        "data_reports": "Data-Reports",
+        "industry_-_sector_research": "Industry-Sector",
+        "research_news": "Research-News",
+        "compliance": "Compliance"
+    };
+    return categoryMapping[key];
+}
+
+const handleMultipleUrls = ({ region_filters, research_type_filters, series_filters, topic_filters }, withFilterUrl) => {
+    const typeList = [...research_type_filters.list];
+    const allUrls = [];
+    typeList.forEach(type => {
+        var multipleUrl = `/research/v3/organizations/${orgId}/research/${mapTypeKey(type.key.toLowerCase())}${withFilterUrl}${basicParam}`;
+        var multipleType = "&m=1&type=";
+        if (type.child_filters) {
+            type.child_filters.list.forEach(j => {
+                multipleType += `${j.key}|`;
+                var otherUrl = `/research/v3/organizations/${orgId}/research/${mapTypeKey(type.key.toLowerCase())}${withFilterUrl}${basicParamCV1}&type=${j.key}`;
+                allUrls.push(otherUrl);
+            });
+            // var typeIdx = 0;
+            // var typeKey = type.child_filters.list[typeIdx].key;
+            // multipleType += typeKey + `&${selFilter}=(`;
+            // const dataList = {
+            //     "region": region_filters.list,
+            //     "series": series_filters.list,
+            //     "topic": topic_filters.list
+            // }
+
+            // dataList[selFilter].forEach(j => {
+            //     multipleType += `${j.key}|`;
+            //     var otherUrl = `/research/v3/organizations/${orgId}/research/${mapTypeKey(type.key.toLowerCase())}${withFilterUrl}${basicParamCV1}&type=${typeKey}&series=${j.key}`;
+            //     allUrls.push(otherUrl);
+            // })
+
+            multipleType = multipleType.substring(0, multipleType.length - 1) + ")";
+            multipleUrl += multipleType;
+            allUrls.push(multipleUrl);
+        }
+    });
+    return allUrls
+}
+
 const handleUrls = ({ region_filters, research_type_filters, series_filters, topic_filters }, withFilterUrl) => {
     const typeList = [{ key: "all" }, ...research_type_filters.list];
     const allUrls = [];
-    region_filters.list.forEach(region => {
-        typeList.forEach(type => {
-            var otherUrl = `/research/v3/organizations/${orgId}/research/${type.key}${withFilterUrl}${basicParam}`;
-            series_filters.list.forEach(series => {
-                topic_filters.list.forEach(topic => {
-                    allUrls.push(otherUrl + `&topic=${topic.key}&series=${series.key}&region=${region.key}`)
-                });
+    typeList.forEach(type => {
+        var otherUrl = `/research/v3/organizations/${orgId}/research/${mapTypeKey(type.key.toLowerCase())}${withFilterUrl}${basicParam}`;
+        if (type.child_filters) {
+            type.child_filters.list.forEach(j => {
+                otherUrl = `/research/v3/organizations/${orgId}/research/${mapTypeKey(type.key.toLowerCase())}${withFilterUrl}${basicParam}&type=${j.key}`;
+                allUrls.push(otherUrl)
             });
-        });
+        } else {
+            allUrls.push(otherUrl)
+        }
+        // region_filters.list.forEach(region => {
+        //     series_filters.list.forEach(series => {
+        //         topic_filters.list.forEach(topic => {
+        //             otherUrl += `&topic=${topic.key}&series=${series.key}&region=${region.key}`;
+        //             allUrls.push(otherUrl)
+        //         });
+        //     });
+        // });
+        
     });
     return allUrls;
 };
@@ -231,7 +336,7 @@ async function takeSamplesUrls(isFilter, handle) {
     if (isFilter) {
         withFilterUrl = "/filter"
     }
-    var allUrl = `${compareUrl}/research/v3/organizations/${orgId}/research/all/filter${basicParam}`;
+    var allUrl = `${baseUrl}/research/v3/organizations/${orgId}/research/all/filter${basicParam}`;
     return new Promise(res => {
         axios.get(allUrl).then((alldata) => {
             res(handle(alldata.data, withFilterUrl));
@@ -256,13 +361,49 @@ const oneToOneCompare = (compareMethod) => (othUrls) => {
     })
 }
 
+const onToMany = (method) => (allUrls, mIdx) => {
+    return new Promise(resolve => {
+        Promise.all([
+            axios.get(baseUrl + othUrls),
+            axios.get(compareUrl + othUrls)
+        ]).then((result) => {
+            var res = "";
+            if (compareMethod(result)) {
+                res = `${baseUrl + othUrls}  ${compareUrl + othUrls} <div style="color: green;">success</div>  <br />`;
+            } else {
+                res = `${baseUrl + othUrls}  ${compareUrl + othUrls} <div style="color: red;">error</div> <br />`;
+            }
+            resolve(res);
+        });
+    })
+}
+
 async function go() {
     const compareMethod = isFilter ? compareFilterlength : compareDatalength;
     const allUrls = await takeSamplesUrls(isFilter, handleUrls);
     var result = "";
-    for (let i = 10; i < 21; i++) {
+    for (let i = 0; i < (allUrls.length > 50 ? 50 : allUrls.length); i++) {
         result += await oneToOneCompare(compareMethod)(allUrls[i]);
     }
+    return result;
+}
+
+async function goM() {
+    const handle = compareDataWithMultiple;
+    const allUrls = await takeSamplesUrls(isFilter, handleMultipleUrls);
+    const result = await new Promise((resolve) => {
+        const urlsPromise = [];
+        allUrls.forEach(url => {
+            if (!url.includes("m=1")) {
+                urlsPromise.push(axios.get(compareUrl + url));
+            } else {
+                urlsPromise.push(axios.get(baseUrl + url));
+            }
+        });
+        Promise.all(urlsPromise).then((results) => {
+            resolve(handle(results, allUrls, isTypeSelect));
+        });
+    });
     return result;
 }
 
@@ -287,6 +428,14 @@ server.route({
     path: '/',
     handler: (request, h) => {
         return go();
+    }
+});
+
+server.route({
+    method: 'GET',
+    path: '/m',
+    handler: (request, h) => {
+        return goM();
     }
 });
 
